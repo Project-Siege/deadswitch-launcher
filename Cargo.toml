@@ -1,0 +1,13 @@
+[package]
+name = "killrs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sysinfo = "0.37"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging"
+] }
+eframe = "0.27"
+egui = "0.27"
