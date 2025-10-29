@@ -25,13 +25,13 @@ struct GameEntry {
 }
 
 #[derive(Default)]
-struct KillrsApp {
+struct DeadSwitchApp {
     status: Arc<Mutex<String>>,
     games: Vec<GameEntry>,
     monitor_flags: Arc<Mutex<Vec<bool>>>,
 }
 
-impl KillrsApp {
+impl DeadSwitchApp {
     fn new() -> Self {
         let games = detect_games();
         let monitor_flags = Arc::new(Mutex::new(vec![false; games.len()]));
@@ -43,10 +43,10 @@ impl KillrsApp {
     }
 }
 
-impl eframe::App for KillrsApp {
+impl eframe::App for DeadSwitchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Killrs Game Launcher");
+            ui.heading("DeadSwitch Launcher");
 
             if ui.button("🔍 Scan for Installed Games").clicked() {
                 let new_games = detect_games();
@@ -459,5 +459,5 @@ fn main() -> eframe::Result<()> {
             .with_resizable(true),
         ..Default::default()
     };
-    eframe::run_native("Killrs Launcher", options, Box::new(|_cc| Box::new(KillrsApp::new())))
+    eframe::run_native("DeadSwitch Launcher", options, Box::new(|_cc| Box::new(DeadSwitchApp::new())))
 }

@@ -1,5 +1,5 @@
 [package]
-name = "killrs"
+name = "deadswitch"
 version = "0.1.0"
 edition = "2021"
 windows_subsystem = "windows"
