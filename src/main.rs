@@ -21,6 +21,7 @@ struct GameEntry {
     exe_path: String,
     launcher: Launcher,
     steam_app_id: Option<String>,
+    game_dir: String,
 }
 
 #[derive(Default)]
@@ -72,15 +73,26 @@ impl eframe::App for KillrsApp {
                                 });
                             }
                             if ui.button("Exit Game").clicked() {
-                                let exe_name = PathBuf::from(&game.exe_path)
-                                    .file_name()
-                                    .unwrap()
-                                    .to_string_lossy()
-                                    .to_string();
-                                let _ = Command::new("taskkill")
-                                    .args(["/F", "/IM", &exe_name])
-                                    .output();
-                                *self.status.lock().unwrap() = format!("{} force killed.", game.name);
+                                let game_dir = game.game_dir.clone();
+                                let game_name = game.name.clone();
+                                let status = self.status.clone();
+                                thread::spawn(move || {
+                                    *status.lock().unwrap() = format!("Searching for {} processes...", game_name);
+                                    
+                                    if let Some((exe_name, _)) = find_game_process(&game_dir) {
+                                        *status.lock().unwrap() = format!("Killing {}...", exe_name);
+                                        let result = Command::new("taskkill")
+                                            .args(["/F", "/IM", &exe_name])
+                                            .output();
+                                        
+                                        match result {
+                                            Ok(_) => *status.lock().unwrap() = format!("{} killed.", game_name),
+                                            Err(e) => *status.lock().unwrap() = format!("Error killing {}: {}", game_name, e),
+                                        }
+                                    } else {
+                                        *status.lock().unwrap() = format!("{} is not running.", game_name);
+                                    }
+                                });
                             }
                             ui.checkbox(&mut self.monitor_flags.lock().unwrap()[i], "Monitor");
                         });
@@ -96,27 +108,18 @@ impl eframe::App for KillrsApp {
 fn detect_games() -> Vec<GameEntry> {
     let mut games = vec![];
 
-    let rl_path = "C:\\Program Files\\Epic Games\\RocketLeague\\Binaries\\Win64\\RocketLeague.exe";
-    if fs::metadata(rl_path).is_ok() {
-        games.push(GameEntry {
-            name: "Rocket League".into(),
-            exe_path: rl_path.into(),
-            launcher: Launcher::Epic,
-            steam_app_id: None,
-        });
-    }
-
     let epic_root = "C:\\Program Files\\Epic Games";
     if let Ok(entries) = fs::read_dir(epic_root) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() && !path.to_string_lossy().contains("RocketLeague") {
+            if path.is_dir() {
                 if let Some(exe_path) = find_exe_in_dir(&path) {
                     games.push(GameEntry {
                         name: path.file_name().unwrap().to_string_lossy().to_string(),
                         exe_path: exe_path.to_string_lossy().to_string(),
                         launcher: Launcher::Epic,
                         steam_app_id: None,
+                        game_dir: path.to_string_lossy().to_string(),
                     });
                 }
             }
@@ -133,10 +136,11 @@ fn detect_games() -> Vec<GameEntry> {
                 let app_id = find_app_id(&folder_name, steam_apps);
                 if let Some(exe_path) = find_exe_in_dir(&path) {
                     games.push(GameEntry {
-                        name: folder_name,
+                        name: folder_name.clone(),
                         exe_path: exe_path.to_string_lossy().to_string(),
                         launcher: Launcher::Steam,
                         steam_app_id: app_id,
+                        game_dir: path.to_string_lossy().to_string(),
                     });
                 }
             }
@@ -147,15 +151,32 @@ fn detect_games() -> Vec<GameEntry> {
 }
 
 fn find_exe_in_dir(dir: &Path) -> Option<PathBuf> {
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().map(|ext| ext == "exe").unwrap_or(false) {
-                return Some(path);
+    fn find_exe_recursive(dir: &Path, depth: usize) -> Option<PathBuf> {
+        if depth > 5 {
+            return None;
+        }
+        
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().map(|ext| ext == "exe").unwrap_or(false) {
+                    return Some(path);
+                }
+            }
+            
+            for entry in fs::read_dir(dir).ok()?.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(exe) = find_exe_recursive(&path, depth + 1) {
+                        return Some(exe);
+                    }
+                }
             }
         }
+        None
     }
-    None
+    
+    find_exe_recursive(dir, 0)
 }
 
 fn find_app_id(folder_name: &str, steam_apps: &str) -> Option<String> {
@@ -199,6 +220,66 @@ fn get_pid(process_name: &str) -> Option<u32> {
         }
     }
 
+    None
+}
+
+fn get_all_exes_in_dir(dir: &Path) -> Vec<String> {
+    let mut exes = Vec::new();
+    
+    fn collect_exes(dir: &Path, exes: &mut Vec<String>, depth: usize) {
+        if depth > 5 {
+            return;
+        }
+        
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(ext) = path.extension() {
+                        if ext == "exe" {
+                            if let Some(name) = path.file_name() {
+                                exes.push(name.to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                } else if path.is_dir() {
+                    collect_exes(&path, exes, depth + 1);
+                }
+            }
+        }
+    }
+    
+    collect_exes(dir, &mut exes, 0);
+    exes
+}
+
+fn find_game_process(game_dir: &str) -> Option<(String, u32)> {
+    // Method 1: Check all executables in the game directory against running processes
+    let game_path = Path::new(game_dir);
+    let all_exes = get_all_exes_in_dir(game_path);
+    
+    // Filter out common non-game executables
+    let excluded = ["unins", "crash", "report", "launcher", "setup", "install", "update", "eac", "battleye"];
+    
+    for exe_name in &all_exes {
+        let lower = exe_name.to_lowercase();
+        // Skip common non-game executables
+        if excluded.iter().any(|ex| lower.contains(ex)) {
+            continue;
+        }
+        
+        if let Some(pid) = get_pid(exe_name) {
+            return Some((exe_name.clone(), pid));
+        }
+    }
+    
+    // If no filtered match, try all executables
+    for exe_name in &all_exes {
+        if let Some(pid) = get_pid(exe_name) {
+            return Some((exe_name.clone(), pid));
+        }
+    }
+    
     None
 }
 
@@ -259,12 +340,28 @@ fn launch_game(
         .to_string_lossy()
         .to_string();
 
+    let mut actual_exe_name = exe_name.clone();
     let mut pid: Option<u32> = None;
-    for _ in 0..180 {
+    
+    for attempt in 0..180 {
         if let Some(found_pid) = get_pid(&exe_name) {
+            actual_exe_name = exe_name.clone();
             pid = Some(found_pid);
+            *status.lock().unwrap() = format!("{} process found: {}", game.name, exe_name);
             break;
         }
+        
+        if let Some((found_exe, found_pid)) = find_game_process(&game.game_dir) {
+            actual_exe_name = found_exe.clone();
+            pid = Some(found_pid);
+            *status.lock().unwrap() = format!("{} process found: {}", game.name, found_exe);
+            break;
+        }
+        
+        if attempt % 10 == 0 && attempt > 0 {
+            *status.lock().unwrap() = format!("Waiting for {} ({} seconds)...", game.name, attempt / 2);
+        }
+        
         thread::sleep(Duration::from_millis(500));
     }
 
@@ -285,7 +382,10 @@ fn launch_game(
     let failure_threshold = 5;
 
     loop {
-        match get_pid(&exe_name) {
+        let current_pid_opt = get_pid(&actual_exe_name)
+            .or_else(|| find_game_process(&game.game_dir).map(|(_, pid)| pid));
+        
+        match current_pid_opt {
             Some(current_pid) => {
                 if !is_backgrounded_or_unresponsive(current_pid) {
                     if stable_window_seen {
@@ -302,7 +402,7 @@ fn launch_game(
                     if consecutive_failures >= failure_threshold {
                         *status.lock().unwrap() = format!("{} is unresponsive. Force killing...", game.name);
                         let _ = Command::new("taskkill")
-                            .args(["/F", "/IM", &exe_name])
+                            .args(["/F", "/IM", &actual_exe_name])
                             .output();
                         break;
                     }
