@@ -243,7 +243,11 @@ fn get_all_exes_in_dir(dir: &Path) -> Vec<String> {
                         }
                     }
                 } else if path.is_dir() {
-                    collect_exes(&path, exes, depth + 1);
+                    let dir_name = path.file_name().unwrap().to_string_lossy().to_lowercase();
+                    // Skip known non-game directories
+                    if !dir_name.contains("easyanticheat") && !dir_name.contains("battleye") {
+                        collect_exes(&path, exes, depth + 1);
+                    }
                 }
             }
         }
@@ -258,12 +262,20 @@ fn find_game_process(game_dir: &str) -> Option<(String, u32)> {
     let game_path = Path::new(game_dir);
     let all_exes = get_all_exes_in_dir(game_path);
     
-    // Filter out common non-game executables
-    let excluded = ["unins", "crash", "report", "launcher", "setup", "install", "update", "eac", "battleye"];
+    // Filter out common non-game executables (more comprehensive for Epic Games)
+    let excluded = [
+        "unins", "crash", "report", "setup", "install", "update", 
+        "easyanticheat", "eac", "battleye", "be",
+        "epicgameslauncher", "launcher", "bootstrapper",
+        "ucrtbase", "msvcp", "vcruntime", "d3d",
+        "repair", "prerequisite", "redist", "_be", "_eac"
+    ];
     
+    // First pass: Try to find game executables (excluding utilities)
     for exe_name in &all_exes {
         let lower = exe_name.to_lowercase();
-        // Skip common non-game executables
+        
+        // Skip excluded executables
         if excluded.iter().any(|ex| lower.contains(ex)) {
             continue;
         }
@@ -273,8 +285,15 @@ fn find_game_process(game_dir: &str) -> Option<(String, u32)> {
         }
     }
     
-    // If no filtered match, try all executables
+    // Second pass: If nothing found, try all executables except the most obvious non-games
+    let critical_excluded = ["easyanticheat", "eac_launcher", "battleye", "epicgameslauncher"];
     for exe_name in &all_exes {
+        let lower = exe_name.to_lowercase();
+        
+        if critical_excluded.iter().any(|ex| lower.contains(ex)) {
+            continue;
+        }
+        
         if let Some(pid) = get_pid(exe_name) {
             return Some((exe_name.clone(), pid));
         }
@@ -382,8 +401,13 @@ fn launch_game(
     let failure_threshold = 5;
 
     loop {
+        // Check if the actual process is still running
         let current_pid_opt = get_pid(&actual_exe_name)
-            .or_else(|| find_game_process(&game.game_dir).map(|(_, pid)| pid));
+            .or_else(|| find_game_process(&game.game_dir).map(|(new_exe, pid)| {
+                // Update the tracked exe if we find a different one
+                actual_exe_name = new_exe;
+                pid
+            }));
         
         match current_pid_opt {
             Some(current_pid) => {
@@ -395,6 +419,8 @@ fn launch_game(
                         if stable_window_count >= 10 {
                             stable_window_seen = true;
                             *status.lock().unwrap() = format!("{} window stabilized. Monitoring...", game.name);
+                        } else if stable_window_count % 3 == 0 {
+                            *status.lock().unwrap() = format!("{} waiting for window stability... ({}/10)", game.name, stable_window_count);
                         }
                     }
                 } else if stable_window_seen {
@@ -411,6 +437,10 @@ fn launch_game(
             None => {
                 if stable_window_seen {
                     *status.lock().unwrap() = format!("{} fully exited.", game.name);
+                    break;
+                } else {
+                    // Process died before stabilizing
+                    *status.lock().unwrap() = format!("{} process exited early.", game.name);
                     break;
                 }
             }
